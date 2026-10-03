@@ -3529,6 +3529,7 @@ def create_app(
         from omnigent.server.routes._sessions.common import (
             _session_sandbox_status_cache,
         )
+        from omnigent.server.routes._sessions.orchestration import _dispatch_is_in_flight
         from omnigent.server.routes.sessions import (
             _ensure_runner_relay,
             _publish_runner_recovered_status,
@@ -3595,6 +3596,9 @@ def create_app(
                             conv,
                             routed.client,
                             timeout=10.0,
+                            # A message mid-dispatch (e.g. the one that relaunched this runner)
+                            # starts its own turn; recovering from history would run ahead of it.
+                            suppress_recovery_turn=_dispatch_is_in_flight(conv.id),
                         )
                         init_response.raise_for_status()
                         await restore_active_children(
