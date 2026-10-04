@@ -51,6 +51,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.parse
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
@@ -5676,11 +5677,12 @@ def _composer_rows(pane: str) -> list[str]:
     The first row is :func:`_composer_row`'s glyph row; the rest are the
     continuation rows down to the box's closing rule. A multi-line draft
     can render below the glyph row — a collapsed paste shows a blank
-    ``❯`` with ``[Pasted text #1 +N lines]`` on the next row. The mode
-    footer and status line sit below the closing rule, so they are never
-    included: when no closing rule follows the glyph row, the pane's
-    bottom edge has clipped the box, and everything below the box (footer
-    included) is clipped with it.
+    ``❯`` with ``[Pasted text #1 +N lines]`` on the next row. Rows below
+    the box (the mode footer, a status line, a dialog) are never included:
+    when no closing rule follows the glyph row, the box's extent is
+    unknown, so only the glyph row is returned. A draft continuing below
+    the glyph row of such a clipped box is then not seen, and delivery
+    falls back to its unverified submit.
 
     :param pane: Captured pane text from :func:`_capture_pane`.
     :returns: The framed rows, e.g. ``["❯", "[Pasted text #1 +7 lines]"]``.
@@ -5695,7 +5697,7 @@ def _composer_rows(pane: str) -> list[str]:
         if idx >= len(non_empty):
             continue
         if non_empty[idx].strip()[:1] in _COMPOSER_MODE_GLYPHS:
-            end = next((rule for rule in rules if rule > idx), len(non_empty))
+            end = next((rule for rule in rules if rule > idx), idx + 1)
             return non_empty[idx:end]
     return []
 
@@ -5850,7 +5852,9 @@ def _draft_in_input_box(pane: str, needle: str) -> bool:
     counts as visible when that text contains *needle* (small pastes
     render verbatim) or the :data:`_PASTED_PLACEHOLDER_PREFIX`
     placeholder (Claude Code collapses large pastes).
-    Whitespace is ignored, so a needle wrapped across rows still matches.
+    Whitespace is ignored, so a needle wrapped across rows still matches,
+    and so are Unicode control and format characters (e.g. U+FEFF), which
+    Claude Code keeps in the draft but does not render.
 
     :param pane: Captured pane text from :func:`_capture_pane`.
     :param needle: Marker from :func:`_submit_needle`, e.g.
@@ -5868,10 +5872,26 @@ def _draft_in_input_box(pane: str, needle: str) -> bool:
         tail = glyph_lines[-1].rsplit(_CLAUDE_PROMPT_GLYPH, 1)[1]
     if _PASTED_PLACEHOLDER_PREFIX in tail:
         return True
-    # A long draft wraps, so the needle can straddle rows: compare without whitespace.
-    # Dropping all whitespace also rejoins a word that a hard wrap split mid-token.
-    target = "".join(needle.split())
-    return bool(target) and target in "".join(tail.split())
+    target = _comparable_draft_text(needle)
+    return bool(target) and target in _comparable_draft_text(tail)
+
+
+def _comparable_draft_text(text: str) -> str:
+    """
+    Reduce draft text to the characters a pane capture can be matched on.
+
+    A long draft wraps, so the needle can straddle rows: whitespace is
+    dropped, which also rejoins a word that a hard wrap split mid-token.
+    Control and format characters (categories ``Cc``/``Cf``, e.g. U+FEFF)
+    are dropped too: Claude Code keeps them in the draft but never renders
+    them, so a needle that kept them could not match the pane.
+
+    :param text: Needle or captured input-box text, e.g. ``"\ufefffix it"``.
+    :returns: The comparable text, e.g. ``"fixit"``.
+    """
+    return "".join(
+        ch for ch in text if not ch.isspace() and unicodedata.category(ch) not in {"Cc", "Cf"}
+    )
 
 
 def _format_terminal_failure_tail(pane: str) -> str:

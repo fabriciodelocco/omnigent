@@ -4932,6 +4932,124 @@ def test_inject_user_message_sends_no_extra_enter_after_an_accepted_submit(
     assert tui["enters"] == 1, f"Expected one submit Enter, got {tui['enters']}."
 
 
+def test_inject_user_message_retries_enter_for_a_draft_with_invisible_characters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A draft holding U+FEFF is still recognised, so its swallowed Enter is retried.
+
+    Claude Code keeps Unicode format characters in the draft but never
+    renders them, and its first Enter only strips them ("Removed 2
+    invisible characters · review and press Enter to send"). A needle that
+    kept them never matched the pane, so delivery treated the message as
+    sent after that one Enter and it sat unsent.
+    """
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge._CLAUDE_READY_POLL_INTERVAL_S", 0.01
+    )
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._SUBMIT_RETRY_INTERVAL_S", 0.02)
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._PASTE_SETTLE_S", 0.0)
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._PASTE_COMMIT_TIMEOUT_S", 0.2)
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._TRUSTED_PARENT", tmp_path)
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(
+        bridge_dir,
+        socket_path=Path("/tmp/example/tmux.sock"),
+        tmux_target="claude:0.0",
+    )
+    tui = {"pane": _composer_pane(), "enters": 0}
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        """
+        Simulate a TUI that hides U+FEFF and spends the first Enter stripping it.
+
+        :param cmd: Argv list passed to subprocess.run.
+        :param kwargs: Subprocess kwargs (ignored).
+        :returns: Fake CompletedProcess; capture-pane returns the simulated pane.
+        """
+        del kwargs
+        if "capture-pane" in cmd:
+            return SimpleNamespace(returncode=0, stdout=tui["pane"], stderr="")
+        if "paste-buffer" in cmd:
+            tui["pane"] = _composer_pane("Task: ship the fix")
+        if cmd[-1] == "Enter":
+            tui["enters"] += 1
+            if tui["enters"] == 1:
+                tui["pane"] = _composer_pane("Task: ship the fix").replace(
+                    "? for shortcuts",
+                    "Removed 2 invisible characters · review and press Enter to send",
+                )
+            else:
+                tui["pane"] = _composer_pane()
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    inject_user_message(bridge_dir, content="\ufeff\ufeffTask: ship the fix")
+
+    assert tui["pane"] == _composer_pane(), "The draft was left unsent in the input box."
+    assert tui["enters"] == 2
+
+
+def test_inject_user_message_ignores_rows_below_an_unclosed_input_box(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    With no closing rule under the prompt row, the rows below are not read as the draft.
+
+    Here the started turn's pane shows the empty ``❯`` row directly under
+    the last rule, with the mode footer and a status line carrying the
+    session title (the prompt's first words) below it. Counting those rows
+    as the input box would read the title as a still-pending draft and
+    send retry Enters into the running turn.
+    """
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge._CLAUDE_READY_POLL_INTERVAL_S", 0.01
+    )
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._SUBMIT_RETRY_INTERVAL_S", 0.02)
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._SUBMIT_VERIFY_TIMEOUT_S", 0.5)
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._PASTE_SETTLE_S", 0.0)
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._TRUSTED_PARENT", tmp_path)
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(
+        bridge_dir,
+        socket_path=Path("/tmp/example/tmux.sock"),
+        tmux_target="claude:0.0",
+    )
+    unclosed_after_submit = """\
+❯ Task: ship the paste submit fix
+──────────────────────────────
+❯
+  ⏵⏵ auto mode on (shift+tab to cycle)
+  Task: ship the paste submit fix · Opus
+"""
+    tui = {"pane": _composer_pane(), "enters": 0}
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        """
+        Simulate a TUI that accepts the first Enter and leaves the box unclosed.
+
+        :param cmd: Argv list passed to subprocess.run.
+        :param kwargs: Subprocess kwargs (ignored).
+        :returns: Fake CompletedProcess; capture-pane returns the simulated pane.
+        """
+        del kwargs
+        if "capture-pane" in cmd:
+            return SimpleNamespace(returncode=0, stdout=tui["pane"], stderr="")
+        if "paste-buffer" in cmd:
+            tui["pane"] = _composer_pane("Task: ship the paste submit fix")
+        if cmd[-1] == "Enter":
+            tui["enters"] += 1
+            tui["pane"] = unclosed_after_submit
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    inject_user_message(bridge_dir, content="Task: ship the paste submit fix")
+
+    assert tui["enters"] == 1, f"Expected one submit Enter, got {tui['enters']}."
+
+
 def test_inject_user_message_raises_when_draft_never_submits(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
