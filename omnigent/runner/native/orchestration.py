@@ -1233,21 +1233,39 @@ async def _codex_native_launch_config(
     *,
     session_id: str,
     server_client: httpx.AsyncClient | None,
+    session_init: RunnerSessionInitEnvelope | None = None,
 ) -> _CodexNativeLaunchConfig:
     """
-    Fetch and validate persisted Codex launch config for a session.
+    Load and validate persisted Codex launch config for a session.
 
     :param session_id: Session/conversation id, e.g. ``"conv_abc123"``.
     :param server_client: Runner Omnigent server client.
+    :param session_init: Current initialization metadata. Missing or incomplete
+        metadata falls back to the session endpoint for older servers.
     :returns: Parsed launch config.
     :raises RuntimeError: If the session snapshot or required runner env is
         unavailable.
     """
-    snapshot = await _fetch_native_launch_snapshot(
-        server_client=server_client,
-        session_id=session_id,
-        runtime_label="Codex",
-    )
+    launch_fields = {
+        "workspace",
+        "terminal_launch_args",
+        "model_override",
+        "external_session_id",
+        "reasoning_effort",
+        "labels",
+        "harness_override",
+        "cost_control_mode_override",
+    }
+    # Older envelopes can omit fields that default to None during parsing.
+    # Only explicit values, including nulls, replace the legacy config read.
+    if session_init is not None and launch_fields <= session_init.snapshot.model_fields_set:
+        snapshot = session_init.snapshot.model_dump(mode="json")
+    else:
+        snapshot = await _fetch_native_launch_snapshot(
+            server_client=server_client,
+            session_id=session_id,
+            runtime_label="Codex",
+        )
     terminal_launch_args = snapshot.get("terminal_launch_args")
     if terminal_launch_args is not None and not (
         isinstance(terminal_launch_args, list)
@@ -4691,6 +4709,7 @@ async def _auto_create_codex_terminal(
     skills_filter: str | list[str] = "all",
     agent_spec: AgentSpec | ResolvedSpec | None = None,
     server_client: httpx.AsyncClient | None = None,
+    session_init: RunnerSessionInitEnvelope | None = None,
     ensure_comment_relay: _EnsureCommentRelay | None = None,
 ) -> SessionResourceView:
     """
@@ -4733,6 +4752,8 @@ async def _auto_create_codex_terminal(
         default, e.g. ``"gpt-5.4-mini"``.
     :param server_client: Runner's Omnigent server HTTP client. Used to read
         persisted launch args and the native thread id.
+    :param session_init: Snapshot supplied for this initialization. Later
+        terminal ensures omit it to read updated configuration from the server.
     :returns: The created terminal resource view.
     """
     import socket as _socket
@@ -4765,6 +4786,7 @@ async def _auto_create_codex_terminal(
     launch_config = await _codex_native_launch_config(
         session_id=session_id,
         server_client=server_client,
+        session_init=session_init,
     )
     original_external_session_id = launch_config.external_session_id
     workspace = str(launch_config.workspace)
@@ -4815,7 +4837,10 @@ async def _auto_create_codex_terminal(
     # Thread the spec so its executor.auth / legacy profile win over
     # machine-level config, parity with the in-process harness (#2744).
     _launch_spec = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
-    _codex_launch = resolve_native_codex_launch(model=default_model, spec=_launch_spec)
+    _codex_terminal_args = launch_config.terminal_launch_args or ()
+    _codex_launch = resolve_native_codex_launch(
+        model=default_model, spec=_launch_spec, terminal_launch_args=_codex_terminal_args
+    )
     from omnigent.inference_config import binding_for_harness, load_runtime_inference_config
 
     codex_binding = binding_for_harness(load_runtime_inference_config(), "codex-native")
@@ -4826,7 +4851,10 @@ async def _auto_create_codex_terminal(
     _fresh_codex_catalog: list[_JsonObject] | None = None
     try:
         _catalog_launch = await asyncio.to_thread(
-            resolve_native_codex_launch, model=None, spec=_launch_spec
+            resolve_native_codex_launch,
+            model=None,
+            spec=_launch_spec,
+            terminal_launch_args=_codex_terminal_args,
         )
         _fresh_codex_catalog = fresh_codex_launch_catalog(
             codex_path=_codex_cli_path,
@@ -4863,7 +4891,10 @@ async def _auto_create_codex_terminal(
         try:
             if _catalog_launch is None:
                 _catalog_launch = await asyncio.to_thread(
-                    resolve_native_codex_launch, model=None, spec=_launch_spec
+                    resolve_native_codex_launch,
+                    model=None,
+                    spec=_launch_spec,
+                    terminal_launch_args=_codex_terminal_args,
                 )
             # Read staleness before the fetch can start a background probe.
             # The fingerprint and probe must use this session's provider.
@@ -4896,7 +4927,9 @@ async def _auto_create_codex_terminal(
                 # Re-resolve so provider overrides cannot retain the old model.
                 # A failed probe permits fallback, but cannot retire the pick.
                 _codex_launch = resolve_native_codex_launch(
-                    model=unpinned_model, spec=_launch_spec
+                    model=unpinned_model,
+                    spec=_launch_spec,
+                    terminal_launch_args=_codex_terminal_args,
                 )
                 pick_to_reset = pick if fresh_rows else None
                 outcome = (
@@ -9502,6 +9535,7 @@ async def _launch_codex(ctx: NativeLaunchContext) -> SessionResourceView:
         skills_filter=ctx.skills_filter,
         agent_spec=ctx.agent_spec,
         server_client=ctx.server_client,
+        session_init=ctx.session_init,
         ensure_comment_relay=ctx.ensure_comment_relay,
     )
 

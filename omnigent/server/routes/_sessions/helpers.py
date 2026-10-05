@@ -71,9 +71,14 @@ from omnigent.errors import (
     restart_on_stale_cursor,
 )
 from omnigent.harness_plugins import (
+    ANTIGRAVITY_NATIVE_CODING_AGENT,
+    CLAUDE_NATIVE_CODING_AGENT,
+    CODEX_NATIVE_CODING_AGENT,
+    DEVIN_NATIVE_CODING_AGENT,
     NativeCodingAgent,
 )
 from omnigent.models.model_metadata import concrete_reported_model
+from omnigent.native.failure_telemetry import failure_log_attributes
 from omnigent.native.native_coding_agents import (
     native_coding_agent_for_harness,
     native_coding_agent_for_wrapper_label,
@@ -284,6 +289,7 @@ from omnigent.server.schemas import (
     SessionTodosEvent,
     ToolOutputDeltaEvent,
 )
+from omnigent.server.session_metadata_logging import harness_attributes
 from omnigent.spec.types import (
     AgentSpec,
     Phase,
@@ -3443,6 +3449,9 @@ async def _persist_external_acp_subagent_start(
     :func:`_resolve_harness_impl` to the parent's (e.g. ``devin``) and the UI
     labels it from the harness catalog.
 
+    The shared ACP event does not identify a concrete harness, so creation
+    telemetry leaves it unresolved for both new and adopted children.
+
     Idempotent: a redelivery with the same ``subagent_id`` returns the existing
     child id, with a title-collision recovery path matching the native helpers.
 
@@ -3517,11 +3526,13 @@ async def _persist_external_acp_subagent_start(
             raise
         await asyncio.to_thread(conversation_store.set_labels, adopted.id, labels)
         await _publish_session_created(
-            parent_id, adopted.id, parent_conv.agent_id, conversation_store
+            parent_id, adopted.id, parent_conv.agent_id, conversation_store, harness=None
         )
         return adopted.id
     await asyncio.to_thread(conversation_store.set_labels, child.id, labels)
-    await _publish_session_created(parent_id, child.id, parent_conv.agent_id, conversation_store)
+    await _publish_session_created(
+        parent_id, child.id, parent_conv.agent_id, conversation_store, harness=None
+    )
     return child.id
 
 
@@ -3570,6 +3581,8 @@ async def _publish_session_created(
     child_session_id: str,
     agent_id: str | None,
     conversation_store: ConversationStore,
+    *,
+    harness: str | None,
 ) -> None:
     """
     Emit ``session.created`` on the parent's stream for a child session.
@@ -3585,6 +3598,7 @@ async def _publish_session_created(
         agent), e.g. ``"ag_abc123"``. ``None`` only for legacy parents
         without one.
     :param conversation_store: Store for the durable parent-chat activity link.
+    :param harness: The harness identified by the child event, or ``None`` when unknown.
     """
     event = SessionCreatedEvent(
         type="session.created",
@@ -3604,8 +3618,11 @@ async def _publish_session_created(
         extra=debug_event(
             "session_created",
             session_id=child_session_id,
+            agent_id=agent_id,
+            session_kind="sub_agent",
             parent_session_id=parent_id,
             creation_kind="child",
+            **harness_attributes(harness, source="subagent_event"),
         ),
     )
     from omnigent.server.subagent_activity import record_subagent_activity
@@ -3771,11 +3788,21 @@ async def _persist_external_subagent_start(
         # In the concurrent-race case the winner also published; a
         # duplicate event is a harmless extra cache invalidation.
         await _publish_session_created(
-            parent_id, adopted.id, parent_conv.agent_id, conversation_store
+            parent_id,
+            adopted.id,
+            parent_conv.agent_id,
+            conversation_store,
+            harness=CLAUDE_NATIVE_CODING_AGENT.harness,
         )
         return adopted.id
     await asyncio.to_thread(conversation_store.set_labels, child.id, labels)
-    await _publish_session_created(parent_id, child.id, parent_conv.agent_id, conversation_store)
+    await _publish_session_created(
+        parent_id,
+        child.id,
+        parent_conv.agent_id,
+        conversation_store,
+        harness=CLAUDE_NATIVE_CODING_AGENT.harness,
+    )
     return child.id
 
 
@@ -3872,11 +3899,21 @@ async def _create_and_publish_antigravity_child(
         # never heard about this child; a duplicate publish in the race case is a
         # harmless extra cache invalidation.
         await _publish_session_created(
-            parent_id, existing.id, parent_conv.agent_id, conversation_store
+            parent_id,
+            existing.id,
+            parent_conv.agent_id,
+            conversation_store,
+            harness=ANTIGRAVITY_NATIVE_CODING_AGENT.harness,
         )
         return existing.id
     await asyncio.to_thread(conversation_store.set_labels, child.id, labels)
-    await _publish_session_created(parent_id, child.id, parent_conv.agent_id, conversation_store)
+    await _publish_session_created(
+        parent_id,
+        child.id,
+        parent_conv.agent_id,
+        conversation_store,
+        harness=ANTIGRAVITY_NATIVE_CODING_AGENT.harness,
+    )
     return child.id
 
 
@@ -4155,12 +4192,22 @@ async def _create_and_publish_codex_child(
             # winner also published; the duplicate is a harmless extra
             # cache invalidation.
             await _publish_session_created(
-                parent_id, existing.id, parent_conv.agent_id, conversation_store
+                parent_id,
+                existing.id,
+                parent_conv.agent_id,
+                conversation_store,
+                harness=CODEX_NATIVE_CODING_AGENT.harness,
             )
             return existing.id
         raise
     await asyncio.to_thread(conversation_store.set_labels, child.id, labels)
-    await _publish_session_created(parent_id, child.id, parent_conv.agent_id, conversation_store)
+    await _publish_session_created(
+        parent_id,
+        child.id,
+        parent_conv.agent_id,
+        conversation_store,
+        harness=CODEX_NATIVE_CODING_AGENT.harness,
+    )
     return child.id
 
 
@@ -4257,12 +4304,22 @@ async def _create_and_publish_devin_child(
         if existing is not None:
             await asyncio.to_thread(conversation_store.set_labels, existing.id, labels)
             await _publish_session_created(
-                parent_id, existing.id, parent_conv.agent_id, conversation_store
+                parent_id,
+                existing.id,
+                parent_conv.agent_id,
+                conversation_store,
+                harness=DEVIN_NATIVE_CODING_AGENT.harness,
             )
             return existing.id
         raise
     await asyncio.to_thread(conversation_store.set_labels, child.id, labels)
-    await _publish_session_created(parent_id, child.id, parent_conv.agent_id, conversation_store)
+    await _publish_session_created(
+        parent_id,
+        child.id,
+        parent_conv.agent_id,
+        conversation_store,
+        harness=DEVIN_NATIVE_CODING_AGENT.harness,
+    )
     return child.id
 
 
@@ -4753,6 +4810,7 @@ def _publish_status(
     persist_live_status: bool = True,
     scheduled_run_outcome: Literal["auto", "failed"] = "auto",
     failure_origin: str | None = None,
+    failure_context: object = None,
 ) -> None:
     """
     Publish a typed :class:`SessionStatusEvent` to the live stream and
@@ -4785,6 +4843,8 @@ def _publish_status(
         server-side failure logs one ERROR from here, so without it the
         dozen unrelated causes that reach this function are one
         undifferentiated signature. Ignored for non-failed edges.
+    :param failure_context: Untrusted optional native evidence, normalized at
+        the failure-log boundary. Malformed values cannot reject the status edge.
     """
     # ``failed`` is sticky against a trailing ``idle``. A turn error is
     # terminal — it must not be silently downgraded to ``idle`` by a
@@ -4859,6 +4919,7 @@ def _publish_status(
                 code=failure_code,
                 previous_status=previous_status or "unknown",
                 response_id=response_id,
+                **failure_log_attributes(failure_context),
             ),
         )
         session_live_state.persist_scheduled_run_completion(
@@ -5836,11 +5897,15 @@ async def _launch_runner_on_host_locked(
     binding_token = secrets.token_urlsafe(32)
     new_runner_id = token_bound_runner_id(binding_token)
 
-    await asyncio.to_thread(
+    bound_conv = await asyncio.to_thread(
         conversation_store.replace_runner_id,
         conv.id,
         new_runner_id,
     )
+    if bound_conv.runner_last_seen is not None:
+        # The new token has not reached the host, so this stamp can only
+        # belong to the previous runner. Clear it before launching.
+        await asyncio.to_thread(conversation_store.clear_runner_liveness, new_runner_id)
     _logger.info(
         "Session bound to runner",
         extra=debug_event(
@@ -7931,6 +7996,18 @@ async def _relay_persist_error_once(
             session_id,
             [item],
         )
+        _logger.info(
+            "Relay: error item persisted for session=%s code=%s",
+            session_id,
+            item.data.code,
+            extra=debug_event(
+                "error_item_persisted",
+                session_id=session_id,
+                code=item.data.code,
+                level=item.data.level,
+                source=item.data.source,
+            ),
+        )
         return "persisted"
     except Exception:  # noqa: BLE001
         _logger.exception(
@@ -9392,7 +9469,7 @@ async def _remove_session_worktree_best_effort(
     worktree_path: str,
     branch: str,
     delete_branch: bool,
-    request: Request,
+    host_registry: Any,
     reason: str,
     conversation_store: ConversationStore | None = None,
     exclude_conversation_id: str | None = None,
@@ -9403,7 +9480,7 @@ async def _remove_session_worktree_best_effort(
     Best-effort removal of a session's git worktree.
 
     Used for create-rollback (orphan cleanup) and opt-in session-delete
-    cleanup. Host-reported git failures are logged so the caller's
+    and session-archive cleanup. Host-reported git failures are logged so the caller's
     primary operation still completes. When ``fail_if_unavailable`` is
     set, an unreachable host raises ``CONFLICT`` instead of skipping —
     the session is left in place so the caller can retry without
@@ -9417,9 +9494,10 @@ async def _remove_session_worktree_best_effort(
         ``"feature/login"``.
     :param delete_branch: When ``True``, also run ``git branch -D``
         after removing the worktree directory.
-    :param request: FastAPI request carrying the host registry.
+    :param host_registry: The ``HostRegistry`` tracking live host
+        tunnels, or ``None`` when host support is not wired.
     :param reason: Short label for log lines, e.g.
-        ``"create-rollback"`` or ``"session-delete"``.
+        ``"create-rollback"``, ``"session-delete"`` or ``"session-archive"``.
     :param conversation_store: Store used to check whether another live
         session shares this directory. ``None`` skips the check — correct
         for create-rollback, whose worktree was made moments ago in the
@@ -9471,7 +9549,6 @@ async def _remove_session_worktree_best_effort(
             )
             return
 
-    host_registry = getattr(request.app.state, "host_registry", None)
     if host_registry is None:
         if fail_if_unavailable:
             raise OmnigentError(

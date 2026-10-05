@@ -39,6 +39,10 @@ from omnigent.runner.resource_registry import (
     CODEX_NATIVE_TERMINAL_ROLE,
     SessionResourceRegistry,
 )
+from omnigent.runner.session_init_protocol import (
+    RunnerSessionInitEnvelope,
+    RunnerSessionInitSnapshot,
+)
 from omnigent.spec.types import AgentSpec, ExecutorSpec
 from tests.runner.conftest import (
     _FakeProcessManager,
@@ -379,7 +383,9 @@ async def test_auto_create_codex_terminal_keeps_loop_responsive_during_profile_r
     monkeypatch.setattr(
         codex_app_mod,
         "resolve_native_codex_launch",
-        lambda *, model, spec=None: codex_app_mod.NativeCodexLaunch([], model, "test-profile"),
+        lambda *, model, spec=None, terminal_launch_args=(): codex_app_mod.NativeCodexLaunch(
+            [], model, "test-profile"
+        ),
     )
 
     task = asyncio.create_task(
@@ -412,6 +418,7 @@ async def test_auto_create_codex_terminal_keeps_loop_responsive_during_profile_r
     ],
 )
 @pytest.mark.parametrize("cancel_launch", [False, True])
+@pytest.mark.parametrize("use_envelope", [False, True], ids=["legacy", "envelope"])
 async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -419,6 +426,7 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     permission_args: list[str],
     retain_subscription: bool,
     cancel_launch: bool,
+    use_envelope: bool,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """
@@ -455,6 +463,26 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     caplog.set_level(logging.INFO, logger="omnigent.runner.app")
     caplog.set_level(logging.INFO, logger="omnigent.runner.native.orchestration")
     bridge_dir = codex_native_bridge.bridge_dir_for_bridge_id(session_id)
+    launch_snapshot = RunnerSessionInitSnapshot(
+        created_at=10,
+        updated_at=11,
+        terminal_launch_args=["--config", "approval_policy=on-request"],
+        model_override="gpt-5.4-mini",
+        external_session_id=thread_id,
+    ).model_dump(mode="json")
+    session_init = (
+        RunnerSessionInitEnvelope.model_validate(
+            {
+                "protocol_version": 2,
+                "server_version": "test",
+                "session_id": session_id,
+                "agent_id": "agent_codex",
+                "snapshot": launch_snapshot,
+            }
+        )
+        if use_envelope
+        else None
+    )
     codex_native_bridge.write_bridge_state(
         bridge_dir,
         codex_native_bridge.CodexNativeBridgeState(
@@ -496,16 +524,10 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
                     request=httpx.Request("GET", url),
                 )
             assert url == f"/v1/sessions/{session_id}", kwargs
+            assert not use_envelope, "Codex init must use the supplied launch metadata"
             return httpx.Response(
                 200,
-                json={
-                    "terminal_launch_args": [
-                        "--config",
-                        "approval_policy=on-request",
-                    ],
-                    "model_override": "gpt-5.4-mini",
-                    "external_session_id": thread_id,
-                },
+                json=launch_snapshot,
                 request=httpx.Request("GET", url),
             )
 
@@ -540,6 +562,14 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
 
     app_server = _FakeCodexAppServer()
     build_calls: list[dict[str, Any]] = []
+    resolve_calls: list[dict[str, Any]] = []
+    real_resolve_launch = codex_app_mod.resolve_native_codex_launch
+
+    def _recording_resolve_launch(**kwargs: Any) -> codex_app_mod.NativeCodexLaunch:
+        resolve_calls.append(kwargs)
+        return real_resolve_launch(**kwargs)
+
+    monkeypatch.setattr(codex_app_mod, "resolve_native_codex_launch", _recording_resolve_launch)
 
     def _fake_build_codex_native_server(**kwargs: Any) -> _FakeCodexAppServer:
         """
@@ -706,6 +736,7 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
                     lambda _sid, event: published_events.append(event),
                     agent_spec=agent_spec,
                     server_client=_SnapshotServerClient(),  # type: ignore[arg-type]
+                    session_init=session_init,
                 )
             assert retained_client.closed is retain_subscription
             assert app_server.closed
@@ -718,6 +749,7 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
             lambda _sid, event: published_events.append(event),
             agent_spec=agent_spec,
             server_client=_SnapshotServerClient(),  # type: ignore[arg-type]
+            session_init=session_init,
         )
         await asyncio.sleep(0)
     finally:
@@ -734,6 +766,11 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     assert build_calls[0]["trust_project"] is True
     assert build_calls[0]["reconcile_process_registry"] is False
     assert build_calls[0]["developer_instructions"] == "Be a concise, careful coding assistant."
+    # Persisted pass-through args must reach launch resolution (--profile layering).
+    assert resolve_calls and all(
+        call["terminal_launch_args"] == ["--config", "approval_policy=on-request"]
+        for call in resolve_calls
+    )
     assert len(launched_specs) == 1
     launched = launched_specs[0]
     assert launched.command == "codex-wrapper"
@@ -4073,7 +4110,7 @@ async def test_auto_create_codex_terminal_default_pin_requires_a_fresh_catalog(
     monkeypatch.setattr(
         codex_app_mod,
         "resolve_native_codex_launch",
-        lambda *, model, spec=None: codex_app_mod.NativeCodexLaunch(
+        lambda *, model, spec=None, terminal_launch_args=(): codex_app_mod.NativeCodexLaunch(
             config_overrides=[], model=model, profile=None
         ),
     )
@@ -4322,7 +4359,7 @@ async def test_auto_create_codex_terminal_accepts_gateway_spelled_override(
     monkeypatch.setattr(
         codex_app_mod,
         "resolve_native_codex_launch",
-        lambda *, model, spec=None: codex_app_mod.NativeCodexLaunch(
+        lambda *, model, spec=None, terminal_launch_args=(): codex_app_mod.NativeCodexLaunch(
             config_overrides=[], model=model, profile=None
         ),
     )
@@ -4572,9 +4609,11 @@ async def test_codex_tui_recovery_preserves_live_control_plane(
     try:
         if launch_fails:
             with pytest.raises(RuntimeError, match="TUI launch failed"):
-                await _auto_create_codex_terminal(session_id, cast(Any, None), lambda *_: None)
+                await native._auto_create_codex_terminal(
+                    session_id, cast(Any, None), lambda *_: None
+                )
         else:
-            result = await _auto_create_codex_terminal(
+            result = await native._auto_create_codex_terminal(
                 session_id, cast(Any, None), lambda *_: None
             )
             assert result is fake_view

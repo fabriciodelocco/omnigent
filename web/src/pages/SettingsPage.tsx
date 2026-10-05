@@ -206,6 +206,10 @@ import {
 } from "@/lib/composerSendShortcutPreferences";
 import { readAlwaysUseWorktree, writeAlwaysUseWorktree } from "@/lib/worktreeDefaultPreferences";
 import {
+  readDeleteWorktreesOnArchive,
+  writeDeleteWorktreesOnArchive,
+} from "@/lib/archiveWorktreePreferences";
+import {
   archivedAtSeconds,
   readRetentionDays,
   writeRetentionDays,
@@ -257,7 +261,7 @@ import {
   readBackgroundSessionTitlesEnabled,
   writeBackgroundSessionTitlesEnabled,
 } from "@/lib/backgroundSessionTitlesPreferences";
-import { SettingsCustomizeSection } from "./settings/SettingsCustomizeSection";
+import { SettingsHarnessesSection } from "./settings/SettingsHarnessesSection";
 import { ReviewImportsPanel } from "@/components/onboarding/HostImportReview";
 
 // Admin-only management surfaces, rendered as the Members / Policies settings
@@ -285,11 +289,21 @@ export function SettingsPage() {
   // A login session exists (accounts OR OIDC) when the server advertises a
   // login_url; gates the Account section so SSO users get it too.
   const hasAuthSession = info !== "loading" && info.login_url !== null;
-  const { section, subSection } = useSettingsRoute();
+  const { section } = useSettingsRoute();
   // Per-section page view: `settings.appearance`, `settings.account`, etc. The
   // hook re-keys on pathname, so switching sections re-fires under the new id.
   // `section` is a closed SettingsSectionId union (no PII / unbounded values).
   useOmnigentPageView(`settings.${section}`);
+
+  const pageWrapperSettings = useMemo(() => {
+    if (section === "harnesses") {
+      return {
+        maxWidthClassName: "max-w-4xl",
+        contentClassName: "px-8",
+      };
+    }
+    return undefined;
+  }, [section]);
 
   // Members / Policies are admin-only management surfaces that own their full
   // layout (their own PageScroll + admin gating), so they render directly —
@@ -312,17 +326,11 @@ export function SettingsPage() {
     );
   }
 
-  // Nested sections own their own layout. useSettingsRoute only sets
-  // subSection for a valid, feature-enabled customize route, so no extra
-  // flag check is needed here.
-  if (section === "customize" && subSection) {
-    return <SettingsCustomizeSection subSection={subSection} />;
-  }
-
   return (
-    <PageScroll contentClassName="px-8" extraBottom="2.5rem">
+    <PageScroll contentClassName="px-8" extraBottom="2.5rem" {...pageWrapperSettings}>
       {section === "appearance" && <AppearanceSection />}
       {section === "general" && <GeneralSection />}
+      {section === "harnesses" && <SettingsHarnessesSection />}
       {section === "git" && <GitSection />}
       {section === "integrations" && <IntegrationsSection />}
       {section === "shortcuts" && <ShortcutsSection />}
@@ -1075,6 +1083,8 @@ function AppearanceSection() {
 
 /** Git behavior settings. */
 function GitSection() {
+  const info = useServerInfo();
+  const archiveWorktreeCleanup = info !== "loading" && info.archive_worktree_cleanup === true;
   return (
     <Section title="Git" description="Configure how Omnigent works with Git.">
       <div className="flex flex-col gap-3">
@@ -1084,6 +1094,11 @@ function GitSection() {
           <div className="mt-4 border-t border-border pt-4">
             <DefaultBaseBranchControl />
           </div>
+          {archiveWorktreeCleanup && (
+            <div className="mt-4 border-t border-border pt-4">
+              <DeleteWorktreesOnArchiveControl />
+            </div>
+          )}
         </div>
       </div>
     </Section>
@@ -1288,6 +1303,40 @@ function AlwaysUseWorktreeControl() {
         data-testid="settings-always-use-worktree-toggle"
         className="mt-0.5 shrink-0"
         componentId="settings.git.always_use_worktree"
+      />
+    </div>
+  );
+}
+
+/**
+ * Remove a session's git worktree when it's archived. Off until chosen; while
+ * unset, the first archive of a worktree session asks instead.
+ */
+function DeleteWorktreesOnArchiveControl() {
+  const [value, setValue] = useState(() => readDeleteWorktreesOnArchive() === true);
+  const labelId = useId();
+  const toggle = useCallback((next: boolean) => {
+    setValue(next);
+    writeDeleteWorktreesOnArchive(next);
+  }, []);
+  return (
+    <div className="flex items-start justify-between gap-6">
+      <div className="flex min-w-0 flex-1 flex-col">
+        <span id={labelId} className="text-ui font-medium">
+          Delete worktrees for archived sessions
+        </span>
+        <span className="text-ui text-muted-foreground">
+          Remove a session's git worktree directory, including uncommitted changes, when you archive
+          it. The branch is kept.
+        </span>
+      </div>
+      <Switch
+        aria-labelledby={labelId}
+        checked={value}
+        onCheckedChange={toggle}
+        data-testid="settings-delete-worktrees-on-archive-toggle"
+        className="mt-0.5 shrink-0"
+        componentId="settings.git.delete_worktrees_on_archive"
       />
     </div>
   );
