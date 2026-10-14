@@ -7064,7 +7064,10 @@ def _mark_dispatch_in_flight(conversation_id: str) -> Iterator[None]:
 
 def _dispatch_is_in_flight(conversation_id: str) -> bool:
     """
-    Whether a message to *conversation_id* is still being dispatched.
+    Whether an event to *conversation_id* is still being dispatched.
+
+    A message counts for its whole request; any other event only while it is
+    posted to the runner.
 
     :param conversation_id: Session/conversation identifier.
     :returns: ``True`` inside a :func:`_mark_dispatch_in_flight` block.

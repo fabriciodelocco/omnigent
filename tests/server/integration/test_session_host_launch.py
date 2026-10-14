@@ -2996,6 +2996,9 @@ async def test_relaunching_message_is_in_flight_until_its_request_ends(
 
     if runner_connects:
         assert resp.status_code < 300, resp.text
+    else:
+        assert resp.status_code == 503, resp.text
+        assert resp.json()["error"]["code"] == "runner_unavailable"
     assert in_flight_at_connect and all(in_flight_at_connect), in_flight_at_connect
     assert not _dispatch_is_in_flight(session_id), "the request ended but its message is in flight"
 
