@@ -1490,12 +1490,13 @@ async def test_relaunching_message_is_the_only_turn_when_the_reconnect_init_wins
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A message that relaunches a stopped runner is its only turn, end to end.
+    """A message that relaunches a runner lost mid-turn is its only turn, end to end.
 
-    The last turn was cut off mid tool call, so history ends in an unanswered function_call. The
-    message relaunches the runner, whose connect hook initializes the session first; the message
-    path's suppressed init reuses that one. The server route, tunnel, connect hook, initializer
-    and a fresh runner are real; only the host's launch is stubbed.
+    The runner was lost during a tool call, so the session is ``failed`` with
+    ``runner_disconnected`` and history ends in an unanswered function_call. A failed session
+    recovers when its runner connects, so the connect hook's init runs first and the message
+    path's suppressed init reuses it. The server route, tunnel, connect hook, initializer and a
+    fresh runner are real; only the host's launch is stubbed.
 
     Mutation check: drop ``suppress_recovery_turn`` from ``_on_runner_connect``'s init, and the
     runner resumes the old work first, with the message buffered behind it.
@@ -1507,6 +1508,7 @@ async def test_relaunching_message_is_the_only_turn_when_the_reconnect_init_wins
     from omnigent.runtime import get_agent_cache, get_agent_store, get_conversation_store
     from omnigent.server.background_session_titles import BACKGROUND_SESSION_TITLES_HEADER
     from omnigent.server.routes import sessions as sessions_module
+    from omnigent.server.schemas import ErrorDetail
 
     ap_app, ap_client = tunnel_three_layer_stack.ap_app, tunnel_three_layer_stack.ap_client
     store = get_conversation_store()
@@ -1519,7 +1521,7 @@ async def test_relaunching_message_is_the_only_turn_when_the_reconnect_init_wins
     session_id = create_resp.json()["session_id"]
     host_id = uuid.uuid4().hex
     store.set_host_id(session_id, host_id, workspace=str(tmp_path))
-    store.replace_runner_id(session_id, "runner-stopped")  # no tunnel: the route relaunches it
+    store.replace_runner_id(session_id, "runner-lost")  # no tunnel: the route relaunches it
     ap_app.state.host_registry.register(
         host_id,
         AsyncMock(),
@@ -1544,6 +1546,13 @@ async def test_relaunching_message_is_the_only_turn_when_the_reconnect_init_wins
                 ),
             ),
         ],
+    )
+    # What losing the runner mid-turn leaves behind (see ``_bind_failed_session``).
+    sessions_module._session_status_cache[session_id] = "failed"
+    await sessions_module._persist_session_status_error_labels(
+        session_id,
+        ErrorDetail(code="runner_disconnected", message="Runner disconnected unexpectedly."),
+        store,
     )
 
     turns: list[str] = []
