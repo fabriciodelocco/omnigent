@@ -107,6 +107,8 @@ logger = logging.getLogger(__name__)
 # producer (Databricks Unity Gateway or a generic key/gateway provider).
 _GATEWAY_AUTH_REFRESH_MS = 900_000
 _CLAUDE_CODE_ENABLE_TOOL_SEARCH_ENV = "ENABLE_TOOL_SEARCH"
+# The runner's ambient Databricks profile, which the Claude CLI child must not pass on.
+_DATABRICKS_CONFIG_PROFILE_ENV = "DATABRICKS_CONFIG_PROFILE"
 # Claude Code floors a thinking budget at this size and requires max_tokens above it.
 _CLAUDE_CODE_MIN_THINKING_BUDGET_TOKENS = 1024
 
@@ -1901,7 +1903,9 @@ class ClaudeSDKExecutor(Executor):
         self._extra_env: dict[str, str] = {}
         if gateway:
             gateway_env = _resolve_gateway_env(
-                databricks_profile,
+                # Name the inherited profile so the CLI's token helper keeps it
+                # after the child env blanks the variable.
+                databricks_profile or os.environ.get(_DATABRICKS_CONFIG_PROFILE_ENV) or None,
                 host_override=self._gateway_host,
                 base_url_override=base_url_override,
                 auth_command_override=self._gateway_auth_command,
@@ -2736,6 +2740,10 @@ class ClaudeSDKExecutor(Executor):
         # ``_get_or_create_client`` via ``_unset_env_var`` — setting it to
         # ``""`` here would still leave an empty key in the child env.
         env = dict(self._extra_env)
+        # MCP servers inherit the CLI's env, and the Databricks SDK merges an ambient
+        # profile into every client it builds. Blank it (the SDK reads "" as unset).
+        if _DATABRICKS_CONFIG_PROFILE_ENV in os.environ:
+            env[_DATABRICKS_CONFIG_PROFILE_ENV] = ""
         api_key_helper = env.pop(_CLAUDE_API_KEY_HELPER_ENV_KEY, None)
         # Teach Claude Code this gateway's spellings so no model surface routes
         # to an id the gateway rejects: pins for the family aliases, rewrites
