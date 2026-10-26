@@ -698,6 +698,8 @@ class TestConstructor(unittest.TestCase):
         helper = executor._extra_env["OMNIGENT_CLAUDE_API_KEY_HELPER"]
         self.assertIn('databricks auth token --profile "runner-profile"', helper)
         self.assertNotIn("databricks auth token --host", helper)
+        # The SDK fallback selects by host, so it keeps the env's own credentials.
+        self.assertIn("databricks_token --host https://example.cloud.databricks.com'", helper)
 
     def test_databricks_flag_no_creds_raises(self):
         from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
@@ -2138,6 +2140,7 @@ class TestSystemMessages(unittest.TestCase):
             base_url_override=None,
             auth_command_override=None,
             auth_refresh_interval_ms=None,
+            profile_from_env=False,
         ):
             return {
                 "ANTHROPIC_BASE_URL": base_url_override or "https://host/ai-gateway/anthropic",

@@ -1260,6 +1260,7 @@ def _resolve_gateway_env(
     base_url_override: str | None = None,
     auth_command_override: str | None = None,
     auth_refresh_interval_ms: int | None = None,
+    profile_from_env: bool = False,
 ) -> dict[str, str]:
     """Build Claude Code gateway env from the gateway transport values.
 
@@ -1293,6 +1294,9 @@ def _resolve_gateway_env(
         e.g. ``"databricks auth token --host ..."`` or ``"printf %s sk-..."``.
     :param auth_refresh_interval_ms: Refresh TTL in milliseconds, e.g.
         ``900000``.
+    :param profile_from_env: Whether *profile* was inherited from
+        ``DATABRICKS_CONFIG_PROFILE``; see
+        :func:`~omnigent.inner.databricks_executor.databricks_bearer_token_command`.
     :returns: Environment values plus an internal apiKeyHelper command
         consumed by :meth:`ClaudeSDKExecutor.run_turn`, or ``{}`` when
         no credentials are available.
@@ -1335,7 +1339,7 @@ def _resolve_gateway_env(
         auth_command = (
             auth_command_override
             if auth_command_override is not None
-            else _databricks_claude_auth_command(host, profile)
+            else _databricks_claude_auth_command(host, profile, profile_from_env=profile_from_env)
         )
     else:
         if base_url_override is None:
@@ -1380,7 +1384,9 @@ def _resolve_gateway_env(
     return gateway_env
 
 
-def _databricks_claude_auth_command(host: str, profile: str | None = None) -> str:
+def _databricks_claude_auth_command(
+    host: str, profile: str | None = None, *, profile_from_env: bool = False
+) -> str:
     """Return the Databricks CLI ``apiKeyHelper`` command for Claude.
 
     :param host: Databricks workspace host, e.g.
@@ -1389,11 +1395,13 @@ def _databricks_claude_auth_command(host: str, profile: str | None = None) -> st
         Preferred over ``--host`` when known; see
         :func:`~omnigent.inner.databricks_executor.databricks_bearer_token_command`,
         which owns the command's shape for every harness.
+    :param profile_from_env: Whether *profile* was inherited from
+        ``DATABRICKS_CONFIG_PROFILE`` rather than configured.
     :returns: Shell command that prints a bearer token.
     """
     from .databricks_executor import databricks_bearer_token_command
 
-    return databricks_bearer_token_command(host, profile)
+    return databricks_bearer_token_command(host, profile, profile_from_env=profile_from_env)
 
 
 def _parse_optional_int(value: str | None) -> int | None:
@@ -1902,14 +1910,18 @@ class ClaudeSDKExecutor(Executor):
         # construction time.
         self._extra_env: dict[str, str] = {}
         if gateway:
+            # Name the inherited profile so the CLI's token helper keeps it
+            # after the child env blanks the variable.
+            inherited_profile = (
+                None if databricks_profile else os.environ.get(_DATABRICKS_CONFIG_PROFILE_ENV)
+            )
             gateway_env = _resolve_gateway_env(
-                # Name the inherited profile so the CLI's token helper keeps it
-                # after the child env blanks the variable.
-                databricks_profile or os.environ.get(_DATABRICKS_CONFIG_PROFILE_ENV) or None,
+                databricks_profile or inherited_profile or None,
                 host_override=self._gateway_host,
                 base_url_override=base_url_override,
                 auth_command_override=self._gateway_auth_command,
                 auth_refresh_interval_ms=self._gateway_auth_refresh_interval_ms,
+                profile_from_env=bool(inherited_profile),
             )
             if not gateway_env:
                 raise OSError(
